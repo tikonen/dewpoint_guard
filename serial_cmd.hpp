@@ -13,4 +13,4 @@ void serial_echo_loop();  // debug
 #define serial_printf(format, ...) printf(format, ##__VA_ARGS__)
 #define serial_printfln(format, ...) printf(format SER_EOL, ##__VA_ARGS__)
 #define serial_print(str) serial_write(str)
-#define serial_println(str) serial_write_line(str)
+#define serial_println(str) serial_writeln(str)
