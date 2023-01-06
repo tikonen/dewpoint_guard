@@ -4,99 +4,140 @@
 #include "printf.h"
 #include "serial_cmd.hpp"
 #include "timer.hpp"
-#include "filter.hpp"
 
-void _putchar(char character) { serial_write_char(character); }
+void _putchar(char character) { serial_writec(character); }
 
+//===== Pin configuration
 #define TOUT_PIN A0          // Outgoing air temperature sense
 #define TIN_PIN A1           // Incoming air temperature sense
 #define CABINET_TEMP_PIN A2  // Cabinet temperature sense
-
-#define ROOM_HEAT_PIN 9     // Room heater enable pin
-#define CABINET_HEAT_PIN 8  // Cabinet heater pin
-
+#define ROOM_HEAT_PIN A4     // Room heater enable pin
+#define CABINET_HEAT_PIN 8   // Cabinet heater pin
 #define BUTTON_PIN 6
 
+//===== Heating configuration
 #define CABINET_HEAT_MINTIME_S 30     // minimum on/off time
 #define ROOM_HEAT_MINTIME_S 60        // minimum on/off time
 #define CABINET_HEAT_THRESHOLD_C 5.0  // Keep over +5 deg
+#define ROOM_HEAT_TRESHOLD_C 15.0     // Heat only if temperature is less than this
+#define TEMP_DELTA_C 2.0              // Celcius
 
-#define TEMP_DELTA_C 2.0  // Celcius
-
-#define ADC_ZERO_POINT_V 1.61  // Zero 0 degrees voltage
-#define ADC_VTOD_MUL 0.02      // 20mV/1 Celcius degree
-#define ADC_MAX (1 << 10 - 1)  // 10bits ADC
-#define ADC_VREF 5.0
+//===== ADC configuration
+#define ADC_MAX ((1 << 10) - 1)  // 10bits ADC
+#define ADC_VREF 5.0             // Voltage reference
 #define ADC_TO_V(a) (ADC_VREF * float(a) / ADC_MAX)
-#define ADC_TO_TEMP(a) ((ADC_TO_V(a) - ADC_ZERO_POINT_V) / ADC_VTOD_MUL)
 
-// Cabinet NTC temperature sensor
-#define CAB_TEMP_R 10e3
-#define CAB_TEMP_NTC_22 5e3    // +22C
-#define CAB_TEMP_NTC_0 14.5e3  // +0C
+//===== ADC conversion parameters
+#define ADC_TEMP_ZERO_POINT_V 1.840  // Zero 0 degrees voltage (defined by the bias led)
+#define ADC_TEMP_VTOD_MUL 0.02       // 20mV/1 Celcius degree
+#define ADC_TO_TEMP(a) ((ADC_TO_V(a) - ADC_TEMP_ZERO_POINT_V) / ADC_TEMP_VTOD_MUL)
+
+//===== Cabinet NTC temperature sensor
+#define CAB_TEMP_R 10e3        // Reference resistor
+#define CAB_TEMP_NTC_22 5e3    // Resistance at +22C
+#define CAB_TEMP_NTC_0 14.5e3  // Resistance at +0C
 #define NTC_R(v) ((ADC_VREF - (v)) * CAB_TEMP_R / (v))
 #define NTC_TEMP_C(v) ((NTC_R(v) - CAB_TEMP_NTC_0) * 22 / (CAB_TEMP_NTC_22 - CAB_TEMP_NTC_0))
 
-// IIR low pass filter to smooth out noisy ADC readings
-class ADCFilter : public LowPassFilter<int>
-{
-public:
-    const float filterRatio = 0.05;
+#define LP_BUFFER_SIZE 16  // Keep as power of 2 for arithmetic performance.
 
-    ADCFilter(int apin)
-        : LowPassFilter(analogRead(apin), filterRatio)
-        , pin(apin)
+#define REPORT_INTERVAL_S 5
+
+// IIR low pass filter to smooth out noisy ADC readings
+struct LowPassFilter {
+    LowPassFilter(int apin)
+        : pin(apin)
     {
+        reset();
     }
 
-    int read() { return update(analogRead(pin)); }
+    void reset()
+    {
+        memset(&buffer[0], 0, sizeof(buffer));
+        idx = 0;
+        acc = 0;
+    }
+
+    void update() { update(analogRead(pin)); }
+
+    int value() const { return acc / LP_BUFFER_SIZE; }
 
 protected:
-    int pin;
+    int buffer[LP_BUFFER_SIZE];
+    uint8_t pin;
+    uint8_t idx;
+    long acc;
+
+    void update(int val)
+    {
+        // Update rolling average over last samples
+        acc = acc - buffer[idx] + val;
+        buffer[idx++] = val;
+        idx %= LP_BUFFER_SIZE;
+    }
 };
 
-ADCFilter roomTinADC(TIN_PIN);
-ADCFilter roomToutADC(TOUT_PIN);
-ADCFilter cabinetADC(CABINET_TEMP_PIN);
+static LowPassFilter roomTinADC(TIN_PIN);
+static LowPassFilter roomToutADC(TOUT_PIN);
+static LowPassFilter cabinetADC(CABINET_TEMP_PIN);
 
 void update_adc()
 {
-    roomTinADC.read();
-    roomToutADC.read();
-    cabinetADC.read();
+    roomTinADC.update();
+    roomToutADC.update();
+    cabinetADC.update();
 }
 
 void report()
 {
-    const float Tin = ADC_TO_TEMP(roomTinADC.read());
-    const float Tout = ADC_TO_TEMP(roomToutADC.read());
-    const int v = ADC_TO_V(cabinetADC.read());
+    const float Tin = ADC_TO_TEMP(roomTinADC.value());
+    const float Tout = ADC_TO_TEMP(roomToutADC.value());
+    int a = cabinetADC.value();
+    const float v = ADC_TO_V(a);
     const float Tcab = NTC_TEMP_C(v);
-    serial_printfln("T(in): %.1C T(out): %.1C T(cabinet): %.1C", Tin, Tout, Tcab);
+    // serial_printfln("Tcab raw %d V %.1f", a, v);
+    serial_printfln("T(in): %.1fC T(out): %.1fC T(cabinet): %.1fC", Tin, Tout, Tcab);
 }
 
 void setup()
 {
     Serial.begin(115200);
 
-    analogReference(EXTERNAL);  // Aref pin
+    analogReference(DEFAULT);
 
     pinMode(ROOM_HEAT_PIN, OUTPUT);
     pinMode(CABINET_HEAT_PIN, OUTPUT);
-
     pinMode(BUTTON_PIN, INPUT_PULLUP);
 
     serial_printfln("%s %s", APP_NAME, APP_VERSION);
 
-    serial_print(F("Initializing"));
+    serial_writeln(F("Initializing"));
 
-    // Let ADC readings stabilize
-    Timer2 initial(false, 3000);
-    while (initial.update()) {
+    for (int i = 0; i < 16; i++) {
         update_adc();
     }
 
     report();
+}
+
+void test_loop()
+{
+    // Test button pressed. Put heat on
+    serial_writeln(F("Test"));
+    report();
+    digitalWrite(ROOM_HEAT_PIN, HIGH);
+    digitalWrite(CABINET_HEAT_PIN, HIGH);
+    delay(1000);
+
+    // Wait until button released
+    while (!digitalRead(BUTTON_PIN)) update_adc();
+
+    report();
+    // Reset state
+    digitalWrite(ROOM_HEAT_PIN, LOW);
+    digitalWrite(CABINET_HEAT_PIN, LOW);
+
+    serial_writeln(F("Resume"));
 }
 
 void loop()
@@ -105,31 +146,37 @@ void loop()
     static bool cabinetHeatOn = false;
     static Timer2 roomTimer(true, ROOM_HEAT_MINTIME_S * 1000ul);
     static Timer2 cabinetTimer(true, CABINET_HEAT_MINTIME_S * 1000ul);
-    static Timer2 reportTimer(true, 60 * 1000ul);
+    static Timer2 reportTimer(true, REPORT_INTERVAL_S * 1000ul);
 
     update_adc();
 
     uint32_t ts = millis();
     if (cabinetTimer.update(ts)) {
         // Timer expired, check status and turn internal heater on/off as needed
-        const int v = ADC_TO_V(cabinetADC.read());
+        const float v = ADC_TO_V(cabinetADC.value());
         const float Tcab = NTC_TEMP_C(v);
         const bool on = Tcab <= CABINET_HEAT_THRESHOLD_C;
-        digitalWrite(CABINET_TEMP_PIN, on);
+        digitalWrite(CABINET_HEAT_PIN, on);
         if (roomHeatOn != on) {
-            serial_printfln("T(cabinet) %.1C Heater: %d", Tcab, on);
+            serial_printfln("T(cabinet) %.1fC Heater: %d", Tcab, on);
         }
         roomHeatOn = on;
     }
 
     if (roomTimer.update(ts)) {
         // Room timer expired. Check temperature delta and turn heater on/off as needed
-        const float Tin = ADC_TO_TEMP(roomTinADC.read());
-        const float Tout = ADC_TO_TEMP(roomToutADC.read());
-        const bool on = Tin - Tout < TEMP_DELTA_C;
+        const float Tin = ADC_TO_TEMP(roomTinADC.value());
+        const float Tout = ADC_TO_TEMP(roomToutADC.value());
+        bool on = Tin - Tout < TEMP_DELTA_C;
+
+        if (Tin > ROOM_HEAT_TRESHOLD_C || Tout > ROOM_HEAT_TRESHOLD_C) {
+            // don't enable heat if temperature is high enough
+            on = false;
+        }
+
         digitalWrite(ROOM_HEAT_PIN, on);
         if (cabinetHeatOn != on) {
-            serial_printfln("T(in): %.1C T(out): %.1C Heater: %d", Tin, Tout, on);
+            serial_printfln("T(in): %.1fC T(out): %.1fC Heater: %d", Tin, Tout, on);
         }
         cabinetHeatOn = on;
     }
@@ -140,25 +187,10 @@ void loop()
 
     bool button = !digitalRead(BUTTON_PIN);
     if (button) {
-        // Test button pressed. Put heat on and
-        serial_println(F("Test"));
-        report();
-        digitalWrite(ROOM_HEAT_PIN, HIGH);
-        digitalWrite(CABINET_HEAT_PIN, HIGH);
-        delay(1000);
-
-        // Wait until button released
-        while (!digitalRead(BUTTON_PIN)) update_adc();
-
-        report();
-        // Reset state
-        digitalWrite(ROOM_HEAT_PIN, LOW);
-        digitalWrite(CABINET_HEAT_PIN, LOW);
-
+        test_loop();
         ts = millis();
         cabinetTimer.reset(ts);
         roomTimer.reset(ts);
         reportTimer.reset(ts);
-        serial_println(F("Resume"));
     }
 }

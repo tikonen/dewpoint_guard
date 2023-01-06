@@ -2,8 +2,8 @@
 
 #define SER_EOL "\r\n"
 
-#define serial_write_line(msg) Serial.println(msg)
-#define serial_write_char(c) Serial.write(c)
+#define serial_writeln(msg) Serial.println(msg)
+#define serial_writec(c) Serial.write(c)
 #define serial_write(msg) Serial.print(msg)
 void serial_clear();
 int serial_read(char* buffer, int count);

@@ -81,6 +81,6 @@ void serial_echo_loop()
 {
     const char* cmd = serial_read_line();
     if (cmd) {
-        serial_write_line(cmd);
+        serial_writeln(cmd);
     }
 }
