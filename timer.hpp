@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 struct ElapsedTimer {
     uint32_t lastTs;
 
@@ -36,6 +38,9 @@ struct Timer {
         flipflop = 0;
     }
 
+    // Set the timer so that next update will trigger reset
+    void set() { cumulative = interval; }
+
     bool update(uint32_t elapseds)
     {
         cumulative += elapseds;
@@ -51,10 +56,11 @@ struct Timer {
 };
 
 struct Timer2 {
-    Timer2(bool autoRes, uint32_t interval)
+    Timer2(bool autoRes, uint32_t interval, bool initiallyset = false)
         : timer(autoRes, interval)
     {
         reset();
+        if (initiallyset) set();
     }
 
     void reset(uint32_t ts)
@@ -62,6 +68,9 @@ struct Timer2 {
         timer.reset();
         lastTs = ts;
     }
+
+    // Set the timer so that next update will trigger reset
+    void set() { timer.set(); }
 
     void reset() { reset(millis()); }
 

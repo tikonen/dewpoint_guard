@@ -21,6 +21,8 @@ void _putchar(char character) { serial_writec(character); }
 #define CABINET_HEAT_THRESHOLD_C 5.0  // Keep over +5 deg
 #define ROOM_HEAT_TRESHOLD_C 15.0     // Heat only if temperature is less than this
 #define TEMP_DELTA_C 2.0              // Celcius
+#define ROOM_MAX_C 80.0               // maximum possible room temperature
+#define ROOM_MIN_C (-50.0)            // minimum possible room temperature
 
 //===== ADC configuration
 #define ADC_MAX ((1 << 10) - 1)  // 10bits ADC
@@ -30,13 +32,14 @@ void _putchar(char character) { serial_writec(character); }
 //===== ADC conversion parameters
 #define ADC_TEMP_ZERO_POINT_V 1.840  // Zero 0 degrees voltage (defined by the bias led)
 #define ADC_TEMP_VTOD_MUL 0.02       // 20mV/1 Celcius degree
-#define ADC_TO_TEMP(a) ((ADC_TO_V(a) - ADC_TEMP_ZERO_POINT_V) / ADC_TEMP_VTOD_MUL)
+#define ADC_TO_C(a) ((ADC_TO_V(a) - ADC_TEMP_ZERO_POINT_V) / ADC_TEMP_VTOD_MUL)
 
 //===== Cabinet NTC temperature sensor
 #define CAB_TEMP_R 10e3        // Reference resistor
-#define CAB_TEMP_NTC_22 5e3    // Resistance at +22C
-#define CAB_TEMP_NTC_0 14.5e3  // Resistance at +0C
-#define NTC_R(v) ((ADC_VREF - (v)) * CAB_TEMP_R / (v))
+#define CAB_TEMP_NTC_22 5e3    // NTC resistance at +22C
+#define CAB_TEMP_NTC_0 14.5e3  // NTC resistance at +0C
+
+#define NTC_R(v) ((ADC_VREF - (v)) * CAB_TEMP_R / (v))  // NTC effective resistance
 #define NTC_TEMP_C(v) ((NTC_R(v) - CAB_TEMP_NTC_0) * 22 / (CAB_TEMP_NTC_22 - CAB_TEMP_NTC_0))
 
 #define LP_BUFFER_SIZE 16  // Keep as power of 2 for arithmetic performance.
@@ -90,8 +93,8 @@ void update_adc()
 
 void report()
 {
-    const float Tin = ADC_TO_TEMP(roomTinADC.value());
-    const float Tout = ADC_TO_TEMP(roomToutADC.value());
+    const float Tin = ADC_TO_C(roomTinADC.value());
+    const float Tout = ADC_TO_C(roomToutADC.value());
     int a = cabinetADC.value();
     const float v = ADC_TO_V(a);
     const float Tcab = NTC_TEMP_C(v);
@@ -141,21 +144,23 @@ void test_loop()
     // Reset state
     digitalWrite(ROOM_HEAT_PIN, LOW);
     digitalWrite(CABINET_HEAT_PIN, LOW);
-
+    delay(1000);
     serial_writeln(F("Resume"));
 }
 
 void loop()
 {
+    static bool errorCondition = false;
     static bool roomHeatOn = false;
     static bool cabinetHeatOn = false;
-    static Timer2 roomTimer(true, ROOM_HEAT_MINTIME_S * 1000ul);
-    static Timer2 cabinetTimer(true, CABINET_HEAT_MINTIME_S * 1000ul);
+    static Timer2 roomTimer(true, ROOM_HEAT_MINTIME_S * 1000ul, true);
+    static Timer2 cabinetTimer(true, CABINET_HEAT_MINTIME_S * 1000ul, true);
     static Timer2 reportTimer(true, REPORT_INTERVAL_S * 1000ul);
+    static Timer2 blinkTimer(true, 500);
 
     update_adc();
 
-    uint32_t ts = millis();
+    const uint32_t ts = millis();
     if (cabinetTimer.update(ts)) {
         // Timer expired, check status and turn internal heater on/off as needed
         const float v = ADC_TO_V(cabinetADC.value());
@@ -170,13 +175,21 @@ void loop()
 
     if (roomTimer.update(ts)) {
         // Room timer expired. Check temperature delta and turn heater on/off as needed
-        const float Tin = ADC_TO_TEMP(roomTinADC.value());
-        const float Tout = ADC_TO_TEMP(roomToutADC.value());
+        const float Tin = ADC_TO_C(roomTinADC.value());
+        const float Tout = ADC_TO_C(roomToutADC.value());
         bool on = Tin - Tout < TEMP_DELTA_C;
 
         if (Tin > ROOM_HEAT_TRESHOLD_C) {
             // don't enable heat if temperature is high enough
             on = false;
+        }
+
+        // check for non-sensical temperature values. These could mean failed sensor or
+        // disconnected cable.
+        errorCondition = Tin < ROOM_MIN_C || Tout < ROOM_MIN_C || Tin > ROOM_MAX_C || Tout > ROOM_MAX_C;
+        if (errorCondition) {
+            on = false;
+            serial_printfln("Sensor Error: T(in): %.1fC° T(out): %.1fC°", Tin, Tout);
         }
 
         digitalWrite(ROOM_HEAT_PIN, on);
@@ -186,6 +199,11 @@ void loop()
         cabinetHeatOn = on;
     }
 
+    if (blinkTimer.update(ts) && errorCondition) {
+        // toggle heater pin to blink the indicator led and alert the user
+        digitalWrite(CABINET_HEAT_PIN, blinkTimer.flipflop());
+    }
+
     if (reportTimer.update(ts)) {
         report();
     }
@@ -193,10 +211,12 @@ void loop()
     bool button = !digitalRead(BUTTON_PIN);
     if (button) {
         test_loop();
-        ts = millis();
-        cabinetTimer.reset(ts);
-        roomTimer.reset(ts);
-        reportTimer.reset(ts);
+        reportTimer.reset(millis());
+
+        // Set the timers so that these will be immediately checked on
+        // the next pass
+        cabinetTimer.set();
+        roomTimer.set();
     }
 
     if (const char* cmd = serial_read_line()) {
