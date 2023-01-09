@@ -99,7 +99,7 @@ void report()
     const float v = ADC_TO_V(a);
     const float Tcab = NTC_TEMP_C(v);
     // serial_printfln("Tcab raw %d V %.1f", a, v);
-    serial_printfln("T(in): %.1fC° T(out): %.1fC° T(cabinet): %.1fC°", Tin, Tout, Tcab);
+    serial_printfln("T(in): %.01fC° T(out): %.01fC° T(cabinet): %.01fC°", Tin, Tout, Tcab);
 }
 
 void setup()
@@ -114,10 +114,10 @@ void setup()
 
     serial_printfln("%s %s", APP_NAME, APP_VERSION);
     serial_printfln("AC on/off time: %ds", ROOM_HEAT_MINTIME_S);
-    serial_printfln("Tdelta: %.1fC°", TEMP_DELTA_C);
-    serial_printfln("T(in) max: %.1fC°", ROOM_HEAT_TRESHOLD_C);
+    serial_printfln("Tdelta: %.01fC°", TEMP_DELTA_C);
+    serial_printfln("T(in) max: %.01fC°", ROOM_HEAT_TRESHOLD_C);
     serial_printfln("Cabinet heater on/off time: %ds", CABINET_HEAT_MINTIME_S);
-    serial_printfln("T(cabinet) min: %.1fC°", CABINET_HEAT_THRESHOLD_C);
+    serial_printfln("T(cabinet) min: %.01fC°", CABINET_HEAT_THRESHOLD_C);
 
     serial_writeln(F("Ready"));
 
@@ -138,7 +138,10 @@ void test_loop()
     delay(1000);
 
     // Wait until button released
-    while (!digitalRead(BUTTON_PIN)) update_adc();
+    while (!digitalRead(BUTTON_PIN)) {
+        update_adc();
+        delay(100);
+    }
 
     report();
     // Reset state
@@ -158,6 +161,7 @@ void loop()
     static Timer2 reportTimer(true, REPORT_INTERVAL_S * 1000ul);
     static Timer2 blinkTimer(true, 500);
 
+    delay(100);
     update_adc();
 
     const uint32_t ts = millis();
@@ -167,10 +171,10 @@ void loop()
         const float Tcab = NTC_TEMP_C(v);
         const bool on = Tcab <= CABINET_HEAT_THRESHOLD_C;
         digitalWrite(CABINET_HEAT_PIN, on);
-        if (roomHeatOn != on) {
-            serial_printfln("T(cabinet) %.1fC° Cabinet Heater: %s", Tcab, on ? "ON" : "OFF");
+        if (cabinetHeatOn != on) {
+            serial_printfln("T(cabinet) %.01fC° Cabinet Heater: %s", Tcab, on ? "ON" : "OFF");
         }
-        roomHeatOn = on;
+        cabinetHeatOn = on;
     }
 
     if (roomTimer.update(ts)) {
@@ -189,14 +193,14 @@ void loop()
         errorCondition = Tin < ROOM_MIN_C || Tout < ROOM_MIN_C || Tin > ROOM_MAX_C || Tout > ROOM_MAX_C;
         if (errorCondition) {
             on = false;
-            serial_printfln("Sensor Error: T(in): %.1fC° T(out): %.1fC°", Tin, Tout);
+            serial_printfln("Sensor Error: T(in): %.01fC° T(out): %.01fC°", Tin, Tout);
         }
 
         digitalWrite(ROOM_HEAT_PIN, on);
-        if (cabinetHeatOn != on) {
-            serial_printfln("T(in): %.1fC° T(out): %.1fC° AC: %d", Tin, Tout, on ? "ON" : "OFF");
+        if (roomHeatOn != on) {
+            serial_printfln("T(in): %.01fC° T(out): %.01fC° AC: %d", Tin, Tout, on ? "ON" : "OFF");
         }
-        cabinetHeatOn = on;
+        roomHeatOn = on;
     }
 
     if (blinkTimer.update(ts) && errorCondition) {
